@@ -5,7 +5,7 @@
 | Meta-Repo | Path | Role |
 |-----------|------|------|
 | **central-command** | `~/GitHub/central-command` | Planning hub (this repo) |
-| **claude-code-memory** | `~/GitHub/claude-code-memory` | Config store (CLAUDE.md, settings, hooks) |
+| **gemini-memory** | `~/GitHub/gemini-memory` | Config store (GEMINI.md files, Gemini CLI settings) |
 
 Spoke repos: `repos/Envision-MCP/`, `repos/Envision-OS-slackwrapper/`, `repos/sage-intacct-sync/`
 

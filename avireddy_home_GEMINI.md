@@ -60,7 +60,7 @@ The user's development environment is configured in the `.zshrc` file and reveal
     *   `ccc`: `cd ~/GitHub/central-command`
     *   `cce`: `cd ~/GitHub/Envision-MCP`
     *   `ccs`: `cd ~/GitHub/Envision-OS-slackwrapper`
-    *   `ccm`: `cd ~/GitHub/claude-code-memory`
+    *   `ccm`: `cd ~/GitHub/claude-code-memory` (Claude Code config — separate from Gemini)
 *   **Other Tools:** The user has `docker` and `bun` installed.
 
 ## Note on Directory Structure
