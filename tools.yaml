@@ -1,0 +1,11 @@
+tools:
+  - type: alloydb-pg
+    name: personal-context-db
+    description: "Personal Context OS — AlloyDB PostgreSQL with Apache AGE graph + pgvector"
+    project: "personal-context-2026"
+    region: "us-central1"
+    cluster: "personal-context"
+    instance: "personal-context-primary"
+    database: "personal_context"
+    user: "avi"
+    password: "${ALLOYDB_PASSWORD}"

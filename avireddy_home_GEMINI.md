@@ -56,6 +56,8 @@ The user's development environment is configured in the `.zshrc` file and reveal
 
 *   **Python:** The user is using Python 3.13 installed via Homebrew.
 *   **GCP:** The default GCP project is `gen-lang-client-0331443493`, but has been changed to `claude-mcp-457317` in the current session.
+*   **API Keys & Secrets:** The Context7 API key (`ctx7sk-...`) is securely vaulted in GCP Secret Manager and exported in `~/.zshrc`. 
+*   **Bleeding Edge Dependencies:** The project tracks the bleeding-edge versions of `google-adk` (v1.27+) and `google-genai` (v1.68.0+) via Context7 documentation.
 *   **Project Shortcuts:** The user has several shell aliases for quickly navigating to related projects in the `~/GitHub/` directory and launching a tool called `claude`.
     *   `ccc`: `cd ~/GitHub/central-command`
     *   `cce`: `cd ~/GitHub/Envision-MCP`
