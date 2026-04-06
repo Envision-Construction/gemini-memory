@@ -1,0 +1,1 @@
+../../claude-code-memory/projects/gemini-memory/CLAUDE.md
