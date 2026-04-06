@@ -1,0 +1,7 @@
+.omc/
+.claude/command-audit.log
+__pycache__/
+*.pyc
+.env
+.env.*
+node_modules/
