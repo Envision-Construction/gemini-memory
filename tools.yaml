@@ -1,11 +1,45 @@
+sources:
+  personal-context-db:
+    kind: alloydb-postgres
+    # Personal Context OS — separate from Envision MCP project (claude-mcp-457317)
+    project: personal-context-2026
+    region: us-central1
+    cluster: personal-context
+    instance: personal-context-primary
+    database: personal_context
+    user: postgres
+    password: ${ALLOYDB_PASSWORD}
+    ipType: Public
+
 tools:
-  - type: alloydb-pg
-    name: personal-context-db
-    description: "Personal Context OS — AlloyDB PostgreSQL with Apache AGE graph + pgvector"
-    project: "personal-context-2026"
-    region: "us-central1"
-    cluster: "personal-context"
-    instance: "personal-context-primary"
-    database: "personal_context"
-    user: "avi"
-    password: "${ALLOYDB_PASSWORD}"
+  ping_db:
+    kind: postgres-sql
+    source: personal-context-db
+    description: Check connectivity to the Personal Context OS database.
+    statement: SELECT 1 AS connected
+
+  list_tables:
+    kind: postgres-sql
+    source: personal-context-db
+    description: List all user tables in the personal context database.
+    statement: |
+      SELECT table_schema, table_name
+      FROM information_schema.tables
+      WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+      ORDER BY table_schema, table_name
+
+  describe_table:
+    kind: postgres-sql
+    source: personal-context-db
+    description: |
+      Describe columns of a table in the personal context database.
+      Takes a table name and returns column names, types, and nullability.
+    parameters:
+      - name: table_name
+        type: string
+        description: Name of the table to describe.
+    statement: |
+      SELECT column_name, data_type, is_nullable
+      FROM information_schema.columns
+      WHERE table_name = $1
+      ORDER BY ordinal_position
