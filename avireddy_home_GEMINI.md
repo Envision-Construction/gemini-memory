@@ -55,7 +55,7 @@ Deployments are handled automatically via Cloud Build when code is pushed to the
 The user's development environment is configured in the `.zshrc` file and reveals several important details:
 
 *   **Python:** The user is using Python 3.13 installed via Homebrew.
-*   **GCP:** The default GCP project is `gen-lang-client-0331443493`, but has been changed to `claude-mcp-457317` in the current session.
+*   **GCP:** The active GCP project is `claude-mcp-457317`.
 *   **API Keys & Secrets:** The Context7 API key (`ctx7sk-...`) is securely vaulted in GCP Secret Manager and exported in `~/.zshrc`. 
 *   **Bleeding Edge Dependencies:** The project tracks the bleeding-edge versions of `google-adk` (v1.27+) and `google-genai` (v1.68.0+) via Context7 documentation.
 *   **Project Shortcuts:** The user has several shell aliases for quickly navigating to related projects in the `~/GitHub/` directory and launching a tool called `claude`.
@@ -65,6 +65,3 @@ The user's development environment is configured in the `.zshrc` file and reveal
     *   `ccm`: `cd ~/GitHub/claude-code-memory` (Claude Code config — separate from Gemini)
 *   **Other Tools:** The user has `docker` and `bun` installed.
 
-## Note on Directory Structure
-
-The "Envision OS" project is currently located in the user's home directory (`/Users/avireddy`). This is unconventional. The user's `.zshrc` file contains a shortcut, `ccs`, that suggests the project is intended to be in `~/GitHub/Envision-OS-slackwrapper`. For any file-based operations, it's important to confirm the correct path with the user.
