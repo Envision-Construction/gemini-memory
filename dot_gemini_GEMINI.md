@@ -31,6 +31,12 @@ globs:
 
 **Default to parallel agents for 2+ independent subtasks.** Don't serialize work that can run concurrently.
 
+### Ultracode auto-workflows vs manual dispatch
+The `~/.zshrc` `claude()` wrapper sets `ultracode` every session. When org Dynamic Workflows are enabled, Claude Code may auto-orchestrate a **Dynamic Workflow** on a substantive task — fanning across isolated plan→change→verify subagents on its own, no `Task()` call needed (live status: `memory/global/reference_ultracode.md`). Two fan-out paths exist:
+- **Auto (ultracode workflows)** — implicit, per substantive task. Self-governed by its own runtime caps (see `context-and-internals.md`) and no token cap. Best when you want built-in adversarial verification (audits, migrations, plan stress-tests). Mechanics: `context-and-internals.md` → Dynamic Workflows. Note: you CANNOT propagate memory/context into auto-spawned workflow subagents the way `[TASK-CONTEXT]` requires for manual `Task()` — the runtime owns their prompts.
+- **Manual (`Task(subagent_type=…)`)** — explicit, when you need a specific agent type, tight scope control, or a known role decomposition. The agent-budget caps below govern THIS path, not auto-workflows.
+Don't stack them blindly: if a workflow is already fanning out, adding manual `Task()` agents on top multiplies token spend. Pick one path per task.
+
 ### Must parallelize when:
 - Scope is already clear — if assumptions are unsurfaced, clarify via AskUserQuestion before fanning out (see `karpathy-guidelines.md` Principle 1)
 - 2+ files can be worked independently
@@ -38,8 +44,8 @@ globs:
 - Research spanning multiple areas (parallel Explore agents)
 - GSD phase with independent plan items
 
-### Don't parallelize:
-- Single-file edits, config changes, purely sequential work
+### Don't manually parallelize (`Task()`):
+- Single-file edits, config changes, purely sequential work (ultracode may still auto-workflow these if substantive — that's the auto path above, not manual dispatch, and is expected)
 
 ### Key agents:
 - **planner** — complex features | **architect** — system design
@@ -50,6 +56,7 @@ globs:
 - Use Opus for complex files (deep SQL, 25+ call sites)
 - Use Haiku for mechanical transforms
 - Verify completion by counting remaining work after merge, not by trusting agent self-reports
+- **Context budget**: subagents overflow their OWN input window when over-fed. Pass pointers (outputId+patterns, file list+line ranges, `LIMIT`ed query), not pasted payloads; decompose a task bigger than one window into ≤15-file slices; never route heavy reads to `Explore` (hard-wired Haiku 200K) — use `general-purpose` (inherits the session 1M model). `task-dispatch-guard.mjs` (PreToolUse) BLOCKS a ≥200KB prompt only when it targets a confirmed small window (haiku pin / built-in Explore); unpinned (inherits 1M) + opus/sonnet WARN instead. Also WARNS on pack-without-grep / read-all / `SELECT *` / missing return-cap / heavy-scope-on-Haiku. Full rule: `memory/global/feedback_subagent_context_budget.md`.
 
 ### Sub-agent return-summary contract
 Per Anthropic context-engineering guidance, sub-agents *"return only a condensed, distilled summary of their work (often 1,000-2,000 tokens)."* Sub-agents are a **context-management primitive**: detailed exploration stays inside the subagent; the parent gets the synthesis. A subagent that returns 5K+ tokens or dumps raw tool output has failed its role — it became a context-blower instead of a context-saver.
@@ -71,8 +78,8 @@ Agents share knowledge via `~/.claude/projects/-Users-avireddy-GitHub-*/memory/`
 
 Per-prompt hooks emit tagged hints into the system-reminder stream so context routing reaches every layer. Each tag has a defined behavior:
 
-- **`[MEMORY-TIER-2] Prompt overlaps with these memory entries — Read for full context: ...`**
-  Fires on UserPromptSubmit when the user prompt scores ≥2 against an entry in `MEMORY.md`. **Action:** Read the listed memory file(s) before responding. The hint suggests; the Read is on you.
+- **`[MEMORY-AUTO] Semantic match against memory/ (gemini-embedding-001, cosine ≥ …): ...`**
+  Fires on UserPromptSubmit from `memory-autosearch.mjs` — fuses cosine + wiki-link BFS + entity-match over `memory/.embeddings.json`. **Action:** Read the listed memory file(s) before responding when they overlap the task. When a match arrives at raw cosine ≥ 0.75 the hook inlines that file's body, so re-reading is unnecessary. (This is the live semantic superset; it replaced the keyword-scored `[MEMORY-TIER-2]` router — `memory-tier2-router.mjs`, removed 2026-06-06.)
 
 - **`[MEMORY-TIER] Personal context query detected. Available Tier 3 tools: ...`**
   Fires when the prompt mentions contacts, meetings, or relationships. **Action:** Call the suggested `mcp__personal-context__*` tool only when the task actually needs personal/contact data. Do not call speculatively — JIT semantics, cost matters.
@@ -83,10 +90,131 @@ Per-prompt hooks emit tagged hints into the system-reminder stream so context ro
 - **`[CROSS-REPO] This operation references <repo> ...`**
   Fires when a tool call touches a repo outside the current working directory. **Action:** Use `pack_codebase(path)` followed by `grep_repomix_output(outputId, pattern)` for deep context, per the existing cross-repo workflow in `envision-platform.md`.
 
+- **`[GSD-SKILL-AUTO] Installed skills semantically relevant to this planning phase ...`**
+  Fires on PreToolUse for `Skill` when a GSD/gsd-pi planning skill is invoked (plan-phase, discuss-phase, new-project/milestone, mvp/spec-phase, autonomous, auto-harness). Hook: `global/hooks/gsd-skill-sense.mjs` — searches `memory/.skill-embeddings.json` against the phase goal from ROADMAP.md. **Action:** propagate the listed skills into gsd-planner/researcher prompts; where a listed skill covers a plan task, the plan invokes it (Skill tool) instead of reimplementing; record considered-but-rejected skills in RESEARCH.md. Fires inside subagents too (harness executors), which never see `[SKILL-AUTO]`.
+
 - **`[GSD-REDTEAM-AUTO] gsd-plan-phase {N} just completed. CANONICAL POST-PLAN PROTOCOL ...`**
-  Fires on PostToolUse for `Skill` tool when the invoked skill is `gsd-plan-phase`. Hook: `global/hooks/gsd-plan-phase-redteam.sh` (lives OUTSIDE the GSD framework tree so framework bumps cannot wipe it). **Action:** Spawn one adversarial general-purpose subagent per just-authored PLAN.md (parallel, fresh context, structured PASS/NEEDS-REVISION/FAIL verdicts with file:line citations). Auto-revise on NEEDS-REVISION/FAIL findings. Loop until PASS or 3 cycles. Persist findings to `REDTEAM-FINDINGS.md` in the phase dir. Canonical rule: `memory/global/feedback_gsd_auto_redteam_after_plan.md`. This is NOT opt-in — discovered 2026-05-17 after 3 FAIL + 11 NEEDS-REVISION on a 15-plan parallel sweep.
+  Fires on PostToolUse for `Skill` tool when the invoked skill is `gsd-plan-phase`. Hook: `global/hooks/gsd-plan-phase-redteam.sh` (lives OUTSIDE the GSD framework tree so framework bumps cannot wipe it). **Action:** Spawn one adversarial general-purpose subagent per just-authored PLAN.md (parallel, fresh context, structured PASS/NEEDS-REVISION/FAIL verdicts with file:line citations). Auto-revise on NEEDS-REVISION/FAIL findings. Loop until PASS or 3 cycles. Persist findings to `REDTEAM-FINDINGS.md` in the phase dir. Canonical rule: `memory/global/feedback_gsd_auto_redteam_after_plan.md`. This is NOT opt-in — discovered 2026-05-17 after 3 FAIL + 11 NEEDS-REVISION on a 15-plan parallel sweep. The hook's step 2a additionally instructs the adversary to audit the Validation Architecture section in RESEARCH.md (Req→Test map, sampling continuity, Wave 0 scaffold completeness) — the plan-time Nyquist surface.
+
+- **`[GSD-NYQUIST-REDTEAM-AUTO] gsd-validate-phase {N} just completed. CANONICAL POST-VALIDATE PROTOCOL ...`**
+  Fires on PostToolUse for `Skill` tool when the invoked skill is `gsd-validate-phase`. Hook: `global/hooks/gsd-validate-phase-redteam.sh` (sibling to the plan-phase hook, same persistence guarantees). **Action:** Spawn one adversarial general-purpose subagent per just-authored VALIDATION.md + every test file it references. Adversary attacks the 5 "auditor goes soft" failure modes from `global/agents/gsd-nyquist-auditor.md` — trivial-pass tests, "file created" treated as "gap filled", weakened assertions, undocumented SKIPs, structural-not-behavioral tests. Per-gap PASS/NEEDS-REVISION/FAIL with requirement ID + test file:line citation. Auto-revise (tests + VALIDATION.md only — implementation is read-only). Loop until all gaps PASS or 3 cycles. Persist findings to `NYQUIST-REDTEAM-FINDINGS.md` in the phase dir. Canonical rule: `memory/global/feedback_gsd_auto_redteam_after_plan.md` → "Nyquist supplement" section.
 
 If a hint fires and the receiving agent ignores it, the per-prompt routing layer becomes ornamental. Acting on tagged hints is the contract that makes the routing real.
+
+# --- alloydb.md ---
+
+---
+description: AlloyDB access patterns — when to use the alloydb skill vs curated MCP tools, two-cluster routing, graphify isolation
+globs:
+  - "**/*"
+---
+
+## AlloyDB Access
+
+Two AlloyDB clusters back the platform. Pick the access path by intent, not by reflex.
+
+### The two clusters
+
+| Cluster | GCP Project | Region | Purpose | Owner repo |
+|---|---|---|---|---|
+| `personal-context-cluster` / `personal-context-primary` | `personal-context-2026` | `us-central1` | 1.05M episodes, 8,159 contacts | `~/GitHub/personal-context` |
+| envision-ontology (see `~/GitHub/Envision-MCP/services/alloydb_client.py`) | `claude-mcp-457317` | `us-central1` | Envision ontology graph (`nodes`, `dim_*`, `fact_*` tables); ADR-046b BQ→AlloyDB migration target | `~/GitHub/Envision-MCP` |
+
+The clusters are **distinct** (different GCP projects, different secrets, different IAM). Don't conflate them.
+
+### Access paths — pick the smallest sufficient one
+
+| Need | Path | Why |
+|---|---|---|
+| Person, meeting, relationship lookup | `mcp__personal-context__*` curated tools | ACL-gated via `authorized_mcp_users.scopes`; audited; PII-aware |
+| Construction data (RFI, budget, schedule, etc.) | `mcp__envision-mcp__*` curated tools (~572) | OIDC-locked; gateway runs SQL; sessions never see raw rows |
+| Raw schema exploration (list tables, views, triggers, sequences, indexes) | `alloydb:alloydb-postgres-data` skill | Read-only system catalog queries; no row reads |
+| Ad-hoc SQL (ad-hoc joins, custom aggregates, incident response) | `alloydb:alloydb-postgres-data` skill | Direct psycopg via Toolbox; logs every statement |
+| Schema migrations during incident response | `alloydb:alloydb-postgres-data` skill + `alembic` runbook | Manual, audited, never inside a session unless explicitly requested |
+| Performance triage | `alloydb:alloydb-postgres-monitor` | Query plans, slow-log analysis |
+| Index health, autovacuum | `alloydb:alloydb-postgres-health` | Storage + maintenance |
+| Cluster/instance provisioning | `alloydb:alloydb-postgres-admin` | Provisioning workflow only |
+
+**Default = curated MCP tools.** Reach for the `alloydb:*` skill only when the curated surface can't express the question.
+
+### Hard prohibitions
+
+1. **Graphify must NEVER touch AlloyDB.** Code-topology layers (graphify, knowledge-graph indexers, portfolio-graph) operate on file artifacts only. The graph holds a service's name and contract, not its schema. See `memory/global/feedback_graphify_alloydb_spanner_isolation.md` — established 2026-05-09, non-negotiable.
+2. **Never paste raw connection strings into transcripts.** Both `envision-alloydb-url` and `personal-context-db-url` live in Secret Manager. Source the profile script; do not echo the secret.
+3. **Never set `ALLOYDB_POSTGRES_*` in `~/.zshrc` or any shared file.** Plugin is single-tenant; cross-cluster contamination = wrong-cluster query = blast radius. Use the per-cluster profile scripts.
+
+### Two-cluster session-launch profile model
+
+The alloydb plugin holds **one set of env vars per session**, set BEFORE `claude` starts and immutable mid-session. To switch clusters safely:
+
+```bash
+# Personal-context cluster
+source ~/.claude/scripts/alloydb-env/personal-context.sh
+claude
+
+# Envision-ontology cluster (separate terminal)
+source ~/.claude/scripts/alloydb-env/envision-ontology.sh
+claude
+```
+
+Both scripts:
+1. Pre-flight check ADC scopes (fail-closed if missing)
+2. Pull the conninfo string from Secret Manager (`gcloud secrets versions access`)
+3. Parse `postgresql://USER:PASS@HOST:PORT/DB?...` into discrete `ALLOYDB_POSTGRES_*` env vars
+4. Never echo the password to stdout
+
+If both scripts have been sourced in the same shell, the SECOND one wins — the plugin reads whatever is currently exported. There's no "switch back" without a new shell.
+
+### Prerequisites (one-time, outside Claude Code)
+
+```bash
+# ADC with the scopes both clusters' IAM + audience validators need
+gcloud auth application-default login \
+  --scopes=openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform
+
+# IAM grants (verify both):
+#   roles/alloydb.client + roles/alloydb.admin on each cluster's project
+#   roles/secretmanager.secretAccessor on both projects for the *-db-url secrets
+gcloud projects get-iam-policy personal-context-2026 --format='table(bindings.role)' | grep -E 'alloydb|secret'
+gcloud projects get-iam-policy claude-mcp-457317      --format='table(bindings.role)' | grep -E 'alloydb|secret'
+```
+
+Without those scopes, `gcloud auth print-identity-token` returns an OPAQUE 113-char token (not a JWT), Cloud Run returns 401, and the alloydb Toolbox fails to connect. Same root cause as the 2026-05-20 envision-mcp 401 incident (`memory/projects/envision-mcp/project_oidc_audience_and_nodes_schema_2026_05_20.md`).
+
+### Network reachability (discovered 2026-05-20)
+
+Both clusters are **PRIVATE IP only** by design (no public IP, no PSC endpoint):
+
+| Cluster | Private IP | Public IP | PSC |
+|---|---|---|---|
+| `personal-context-cmek` / `personal-context-cmek-primary` | `10.78.0.5` | none | none |
+| `envision-ontology` / `envision-ontology-primary` | `10.10.1.2` | none | none |
+
+**From a local Mac without VPC connectivity, NO direct AlloyDB connection works.** The profile scripts default `ALLOYDB_POSTGRES_IP_TYPE=PRIVATE` to match reality, but the actual TCP path requires VPC presence:
+
+| Approach | Works from local Mac? | Why |
+|---|---|---|
+| `alloydb-postgres-data` skill (Go Connector → private IP) | ❌ | Connector dials `10.x.x.x:5433` directly; times out without VPC route |
+| **AlloyDB Auth Proxy** (`alloydb-auth-proxy` binary) | ❌ | Proxy authenticates fine via ADC, but its upstream dial is still to the private IP. **Unlike Cloud SQL Auth Proxy, this one does NOT tunnel via Google's edge.** Verified 2026-05-20: `failed to dial ... 10.78.0.5:5433: i/o timeout`. |
+| **Tailscale / Cloud VPN to the VPC** | ✓ | Direct L3 route to `10.x.x.x` — any postgres tool works |
+| **Cloud Workstations / Cloud Shell** | ✓ | Already in a peered VPC |
+| **From inside the VPC** (Cloud Run, GKE, GCE) | ✓ | Native route — this is how envision-mcp + personal-context-broker reach the DB today |
+
+The skill wiring (rules, hooks, profile scripts, mutation gate) is correct and works **inside the VPC**. Local-Mac end-to-end requires Tailscale/VPN. The `proxy-up.sh` helper exists for completeness — it spawns the auth proxy correctly, but the proxy's upstream dial will time out without VPC reach.
+
+### Mutation gate (PreToolUse hook)
+
+`global/hooks/pre-tool-use.mjs` intercepts Skill invocations where the args contain `alloydb-postgres-data` AND any of: `DROP|TRUNCATE|DELETE|UPDATE|ALTER|GRANT|REVOKE|CREATE|INSERT|MERGE`. The hook surfaces the cluster ID + SQL preview and requires explicit user confirmation before the skill runs the statement.
+
+**Override knob**: `CLAUDE_ALLOYDB_MUTATION_BYPASS=1` in the launching shell disables the gate (audited). Reserved for batch migrations; never set it for interactive sessions.
+
+### Cross-references
+
+- `memory/global/feedback_graphify_alloydb_spanner_isolation.md` — graphify ban (non-negotiable)
+- `memory/global/feedback_personal_context_mcp_auth.md` — personal-context broker vs IAM split
+- `memory/global/reference_alloydb_skill_routing.md` — design rationale + decision history
+- `memory/projects/envision-mcp/project_oidc_audience_and_nodes_schema_2026_05_20.md` — ADC scope failure mode that motivated the pre-flight check
+- `global/scripts/alloydb-env/README.md` — profile script operational notes
 
 # --- cbgto.md ---
 
@@ -160,6 +288,7 @@ globs:
 3. **Full Compact** — maximum compression, most context loss.
 
 ### After compaction
+**Re-read, don't recall — this is a gate, not a suggestion.** When the user signals compaction fired (or asks "what was I working on?" / "resume where we left off"), the cleared FileRead/Bash/Grep results are GONE and conversation history is not a reliable record of their content. Do NOT answer from memory and NEVER fabricate specific files, commits, deploy IDs, or results as if recalled. First acknowledge the cleared state, then re-read the state files and run `git status` / `git log` / `git diff --stat` to recover ground truth BEFORE making any claim about prior work.
 Re-read `~/.claude/CLAUDE.md` + `.planning/STATE.md`. Recovery: STATE.md, ROADMAP.md, per-phase PLAN.md/SUMMARY.md, `git log -5`, `git diff --stat`. Check `FAILED_APPROACHES.md` and `MEMORY.md`.
 After long sessions re-read `rules/envision-platform.md` to re-anchor org context.
 After recovery, apply the authority ladder (`context-priority.md`) to resolve conflicts between recovered state and current instructions.
@@ -171,12 +300,30 @@ After recovery, apply the authority ladder (`context-priority.md`) to resolve co
 - Push critical context to MCP tools (state_write, notepad_write_priority) to survive MicroCompact
 
 ### Model behavior
-- Silent downgrade: Opus -> Sonnet after 3x HTTP 529. Verify with `/model`.
+- Current model: Fable 5 (`claude-fable-5`), Anthropic Direct — persisted via `"model"` in `global/settings.json` (2026-07-01). `opus` alias → Opus 4.8 (fallback). Min CC version for 4.8: v2.1.154 (running 2.1.167+).
+- Usage-threshold fallback: Claude Code may auto-fall-back Opus → Sonnet when you hit a usage limit. Verify with `/model` or `/status`.
 - Tiers: Haiku (lightweight/cheap) | Sonnet (standard) | Opus (architecture/deep reasoning)
 - Fast mode (`/fast`): same model, faster output — not a downgrade
+- Adaptive reasoning is ALWAYS on for Opus 4.7+ — `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING` and `MAX_THINKING_TOKENS` are inert at the current model (they only bite on Opus 4.6 / Sonnet 4.6). The `=1` in settings.json is a no-op on 4.8.
+
+### Effort levels & ultracode
+Effort controls adaptive reasoning depth per step. Ladder on Opus 4.8/4.7: `low` · `medium` · `high` (4.8 default) · `xhigh` · `max` · `ultracode`. (Opus 4.6 / Sonnet 4.6 have no `xhigh`; setting it falls back to `high`.)
+- `low`–`xhigh` persist across sessions (via `effortLevel` in settings, `--effort` flag, or `CLAUDE_CODE_EFFORT_LEVEL`). `max` and `ultracode` are **session-only** and NOT accepted in any of those three channels.
+- **`ultracode`** is a Claude Code setting, not a model rung: it sends `xhigh` AND auto-orchestrates a Dynamic Workflow for each substantive task. Set via `/effort ultracode` or `--settings '{"ultracode":true}'`. **The `~/.zshrc` `claude()` wrapper sets it every session here** (requires org Dynamic Workflows enabled — live status + enabling in `memory/global/reference_ultracode.md`). No token cap when active. Opt out of a single run: `command claude …` (bypasses wrapper) or `/effort high`. **Keeping the wrapper flag is a standing user decision (2026-06-05), NOT drift — do not remove it or "correct" effort thinking it was set accidentally.** It deliberately overrides the default restraint posture (`karpathy-guidelines.md`, `cbgto.md`); honor it.
+- `ultrathink` (prompt keyword, any turn) = one-turn deeper reasoning; does NOT change session effort or trigger a workflow. Other "think harder" phrases are plain prompt text, not keywords.
+
+### Dynamic Workflows (driven by ultracode)
+A workflow fans a task across isolated subagents (plan → change → verify), each with a clean context window — structurally defeating single-window failure modes: early-quitting on long tasks, self-grading bias, goal drift past compaction.
+- Runtime caps: ≤16 concurrent agents (fewer on low-core machines), 1,000 agents/run hard backstop. No token cap.
+- Subagents run in `acceptEdits` and inherit the session tool allowlist regardless of permission mode; file-mutating fan-outs use isolated worktrees. No mid-run human input. Pause/resume by run ID (replays finished stages from cache).
+- In Auto permission mode with ultracode on, the per-run workflow approval prompt is skipped — one fewer manual checkpoint.
+- Requires workflows enabled (Max/Team default on; Pro/Enterprise default off → enable in `/config`). Disable via `/config`, `"disableWorkflows": true`, or `CLAUDE_CODE_DISABLE_WORKFLOWS=1` — which also removes ultracode from `/effort`.
+- Interaction with manual fan-out: agent-budget caps in `agents-and-teams.md` govern MANUAL `Task()` dispatch; ultracode workflows self-govern via the runtime caps above.
+
+(Effort/ultracode/workflow facts verified against Anthropic `model-config` + `workflows` docs, 2026-06-05; re-audit on next Opus or CC release.)
 
 ### Active env vars
-`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80` | `CLAUDE_CODE_MAX_OUTPUT_TOKENS=1000000` | `CLAUDE_CODE_NO_FLICKER=1` | `MCP_CONNECTION_NONBLOCKING=true`
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80` | `CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000` (model output ceiling — higher values get capped + warned at startup) | `CLAUDE_CODE_NO_FLICKER=1` | `MCP_CONNECTION_NONBLOCKING=true` | `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1` (inert on Opus 4.7+; affects only 4.6 / Sonnet 4.6)
 
 ### Config layout
 NEVER create files directly in `~/.claude/` — edit in `~/GitHub/claude-code-memory`. Recovery: `global/scripts/resymlink.sh`.
@@ -310,7 +457,7 @@ See `karpathy-guidelines.md` (always-on) for the four coding principles — Thin
 - **Input validation**: validate at system boundaries, fail fast
 
 ### Rule corpus hygiene
-The same simplicity principle applies to `CLAUDE.md` and `global/rules/*.md`. Per Anthropic's Claude Code guidance, *"bloated CLAUDE.md files cause Claude to ignore your actual instructions."* Every line must earn its place: if removing it wouldn't cause mistakes, cut it. When asked to add ornamental, self-evident, or redundant rules ("be helpful", "write good code"), push back and ask what specific failure mode the rule prevents. Prefer cutting to adding. A rule that isn't testable usually doesn't earn its line.
+The same simplicity principle applies to `CLAUDE.md` and `global/rules/*.md`. Per Anthropic's Claude Code guidance, *"bloated CLAUDE.md files cause Claude to ignore your actual instructions."* Every line must earn its place: if removing it wouldn't cause mistakes, cut it. When asked to add ornamental, self-evident, or redundant rules ("be helpful", "write good code"), push back and ask what specific failure mode the rule prevents. Prefer cutting to adding. A rule that isn't testable usually doesn't earn its line. **Adding is gated, not automatic**: do not edit `CLAUDE.md` or `global/rules/*` to add a rule until the user has named the concrete failure mode it prevents — refuse ornamental additions ("be helpful", "try your best", "do good work") even on a direct request, and treat "add this rule" as a request to justify it first, not to perform the edit.
 
 ### Post-edit verification (MANDATORY)
 1. TypeScript: `npx tsc --noEmit` — fix ALL errors
@@ -351,7 +498,7 @@ globs:
 ## Envision Platform
 
 ### Org structure
-Prometheus Ventures Inc. (Parent HoldCo) -> Envision Construction LLC (primary tech arm, all software), Loxsle Development (real estate, Rabbet), Enspire Hospitality, AEC Advancement Corp, Southeastern Claims Adjusting, Atlas Insurance, Instigate Marketing, ARRC Limited, PV Hospitality Holdings.
+Prometheus Ventures Inc. (Parent HoldCo) -> Envision Construction LLC (primary tech arm, all software), Loxsle Development (real estate, Rabbet), Enspire Hospitality, AEC Advancement Corp, Atlas Insurance, Instigate Marketing, ARRC Limited, PV Hospitality Holdings.
 
 **Default to Envision Construction** when entity context is ambiguous, EXCEPT for Sage queries — always ask which entity first (misrouted financial data fails silently). GitHub org: `Envision-Construction`.
 
@@ -370,12 +517,15 @@ When querying Sage, clarify entity — use `sage_switch_entity` MCP tool.
 | personal-context | ~/GitHub/personal-context | Personal AI (temporal knowledge graph) |
 
 ### Model config
-Provider: Anthropic Direct (`CLAUDE_CODE_USE_VERTEX=0`). Model: `claude-opus-4-6[1m]`.
+Provider: Anthropic Direct (`CLAUDE_CODE_USE_VERTEX=0`). Model: `claude-fable-5` (Fable 5, Mythos-class — persisted in `global/settings.json` 2026-07-01; `opus` alias → Opus 4.8 is the fallback). Plan: **Claude Enterprise** (relevant: Dynamic Workflows are admin-gated for the org).
 Switch in-session: `/model sonnet`, `/model opus[1m]`. Set `CLAUDE_CODE_USE_VERTEX=1` for Vertex AI.
+Effort: the `~/.zshrc` `claude()` wrapper sets `ultracode` every launch (needs org Dynamic Workflows enabled). Ladder, live status + enabling: `context-and-internals.md`, `memory/global/reference_ultracode.md`.
 
 ### GCP / Deploy
 
 The deploy mechanism is **per-service**, not universal. Default assumption is push-to-deploy via Cloud Build, but verify before acting on a deploy request.
+
+**For NEW services**: walk the decision tree in `service-deployment-policy.md` before choosing a substrate. Default is **Substrate A (Pure Cloud Run, Python)** for backends; Vercel for frontends. (Cross-service orchestration is dev-time Claude Code Dynamic Workflows, not a deployed substrate — the Mastra substrates were retired 2026-06-29.)
 
 **Triggered services** (push-to-deploy via Cloud Build):
 - `Envision-MCP` (envision-mcp, envision-comms, envision-context, envision-mcp-external, envision-mcpx)
@@ -401,6 +551,57 @@ This split exists because the manual-deploy services were imported into `claude-
 Hooks auto-detect cross-repo references and inject `[CROSS-REPO]` hints.
 When you see it: `pack_codebase(path)` -> `grep_repomix_output(outputId, pattern)`.
 Static facts -> rules files. Current state -> MCP tools (clickup_*, sage_*, procore_*, gmail_*, slack_*).
+
+### Service deployment policy (for NEW services)
+
+See sibling rule `service-deployment-policy.md` — the decision tree that picks the substrate (Pure Cloud Run Python / Vercel) for any new service. Default backend is Substrate A (Pure Cloud Run, Python); orchestration is dev-time Claude Code Dynamic Workflows, not a deployed substrate (Mastra retired 2026-06-29). Existing services don't migrate automatically. Canonical doc: `~/GitHub/central-command/docs/SERVICE-DEPLOYMENT-POLICY.md`.
+
+### AlloyDB access patterns (two clusters, two paths)
+
+Two distinct AlloyDB clusters back the platform:
+
+| Cluster | Project | Backs | Default access |
+|---|---|---|---|
+| `personal-context-cluster` / `personal-context-primary` | `personal-context-2026` | Episodes + contacts | `mcp__personal-context__*` curated tools |
+| envision-ontology (psycopg pool in `services/alloydb_client.py`) | `claude-mcp-457317` | Ontology graph (`nodes`, `dim_*`, `fact_*`) | `mcp__envision-mcp__*` curated tools |
+
+Raw-SQL escape hatch for either cluster = `alloydb:alloydb-postgres-data` skill, gated by per-cluster session-launch profiles in `global/scripts/alloydb-env/`. Full contract: `global/rules/alloydb.md`. Graphify-AlloyDB isolation (`feedback_graphify_alloydb_spanner_isolation.md`) remains non-negotiable — that path is for code topology only, never schemas.
+
+### Open GSD coexistence (gsd-core L1 vs gsd-pi L2 eval)
+See `docs/architecture/gsd-core-pi-coexistence.md` — L0–L5 layer model, 4-collision table, isolation contract, Dynamic Workflow Authority Block. gsd-pi is an eval-only fork (never default); gsd-core is the control plane. Memory: `memory/global/reference_open_gsd_coexistence_doctrine.md`.
+
+# --- headroom.md ---
+
+## Headroom — Context-Budget Compression Plane
+
+Headroom (`headroom-ai`, pipx-installed, v0.26.0+) is the portfolio's **context-compression layer**: it compresses tool outputs, file dumps, search results, and long histories *before they reach the model*. It is a **budget optimizer, NOT a memory engine** — it never replaces the curated-markdown memory layer, and its built-in SQLite `memory` store is deliberately unused here (the 2026-06-06 memory decision-of-record forbids a second memory engine).
+
+### How it's wired (this machine)
+
+- **Always-on proxy (every interactive session).** The `~/.zshrc claude()` wrapper inline-scopes `ANTHROPIC_BASE_URL=http://127.0.0.1:8787` (via `global/scripts/headroom-proxy-guard.sh`) onto each launch, routing Claude Code traffic through a singleton proxy (LaunchAgent `com.envision.headroom-proxy`); `claude-direct`/`claude-gemma`/`claude-gateway` are bypasses. Large tool outputs come back compressed with CCR hash markers; the model calls `headroom_retrieve` when it needs the original.
+- **On-demand MCP tools.** Registered server `headroom` → `mcp__headroom__headroom_compress` / `…_retrieve` / `…_stats`. Use these to compress a specific large payload, fetch an original by hash, or read savings stats — independent of the proxy.
+
+### Mode (token vs cache) — this matters
+
+`--mode cache` is the **default** (set in the LaunchAgent + guard): it freezes prior turns to preserve Anthropic prefix-cache hits while still compressing new large tool outputs. This protects Claude Code's cache economy — `token` mode rewrites prior turns for max compression but busts the prefix cache, which can *raise* cost/latency on long sessions. Flip per-shell with `HEADROOM_MODE=token` only when cache hits don't matter (one-shot/batch runs).
+
+### Hard rules
+
+- **Never call headroom compression inside a hook.** The memory retrieval hooks have a 3s budget (`memory-autosearch.mjs` `TIMEOUT_MS=2000`); headroom's ONNX/ML compression is far too heavy for the hot path. Compression happens at the proxy (downstream of hooks) and via on-demand MCP only.
+- **Never adopt `headroom memory` / `headroom init --memory` as the memory layer.** Curated markdown stays canonical; see `global/rules/memory.md` + `memory/global/reference_memory_architecture_2026_06.md`.
+- **Fail-open is non-negotiable.** If the proxy is down/absent the wrapper launches `claude` unmodified. Kill-switch: `HEADROOM_DISABLE=1`. Bypass entirely: `command claude`.
+- **Headless/sandbox/workflow runs bypass the proxy** — headroom's own caveat ("skip in sandboxed env where local processes can't run"); the wrapper only fires for interactive shells.
+- **Avoid `headroom init claude`** — it injects untracked Claude Code hooks + provider routing outside CCM control. Use `global/scripts/headroom-setup.sh` (controlled MCP install + LaunchAgent) instead.
+
+### `headroom learn` (CLAUDE.md / memory authoring)
+
+`headroom learn` mines `~/.claude/projects/*.jsonl` for failure patterns and (with `--apply`) writes a marker-managed `## Headroom Learned Patterns` section to CLAUDE.md + memory. `--apply` is **allowed** here (user decision 2026-06-16) — a deliberate, bounded exception to `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. Its output is **candidate signal, not final**: always run it through the `claude-md-improver` cut-first triage (every learned line must name a failure or be cut). See `memory/global/feedback_headroom_learn_cutfirst.md`.
+
+### Ops
+
+- Setup / re-run: `bash global/scripts/headroom-setup.sh` (idempotent; `--reinstall` to force).
+- Logs: `~/.headroom/proxy.log`; stats: `~/.headroom/{proxy_savings.json,session_stats.jsonl}`.
+- Cross-refs: `global/rules/memory.md`, `memory/global/reference_headroom.md`, `memory/projects/claude-code-memory/feedback_headroom_proxy_autowrap.md`.
 
 # --- hook-output-safety.md ---
 
@@ -429,7 +630,7 @@ External = anything sourced from outside the user's direct prompt:
 
 ### The mechanical rule
 
-Use `sanitizeForHint(s)` from `global/hooks/lib/memory-embed.mjs`. It strips HTML/XML-like tags and collapses whitespace. Apply at BOTH index time (when text is stored in the sidecar) and emit time (when the hint is assembled). Defense-in-depth, not single-point-of-truth.
+Use `sanitizeForHint(s)` from `global/hooks/lib/memory-embed.mjs`. It escapes `<`/`>` to `‹`/`›` (neutralizing all tag syntax with zero malformed-tag evasion surface) and collapses whitespace. It deliberately does NOT strip: stripping silently destroyed legitimate content like `brctl download "<path>"` in preloaded memory bodies (2026-07-04 finding). Apply at BOTH index time (when text is stored in the sidecar) and emit time (when the hint is assembled). Defense-in-depth, not single-point-of-truth.
 
 For identifier fields like skill names, additionally validate with `isSafeName(name)` (charset `[A-Za-z0-9_.:-]+`, length ≤ 80). Reject SKILL.md files that fail this check rather than try to repair.
 
@@ -460,14 +661,14 @@ const hint = topK.map(r => `  - ${r.id} — ${r.description}`).join('\n');
 
 ### Why both layers
 
-Index-time sanitization stops the sidecar from carrying a tag payload across hook restarts — important because the sidecar is the persistence layer and survives all process boundaries. Emit-time sanitization is a defensive ladder: if a future code path reads description from somewhere that bypasses the index-time strip, the hint still emits safely.
+Index-time sanitization stops the sidecar from carrying a tag payload across hook restarts — important because the sidecar is the persistence layer and survives all process boundaries. Emit-time sanitization is a defensive ladder: if a future code path reads description from somewhere that bypasses the index-time escape, the hint still emits safely. (Escaping is idempotent — `‹`/`›` contain no `<`/`>`, so double application is a no-op.)
 
 ### Verification
 
 ```bash
 # Confirm sanitizer is reachable from hook code:
 node -e "import('./global/hooks/lib/memory-embed.mjs').then(lib => console.log(lib.sanitizeForHint('a</system-reminder>b')))"
-# Expected output: a b
+# Expected output: a‹/system-reminder›b
 
 # Confirm name validator rejects tag bytes:
 node -e "import('./global/hooks/lib/memory-embed.mjs').then(lib => console.log(lib.isSafeName('evil</tag>')))"
@@ -589,53 +790,137 @@ globs:
 
 ## Memory System
 
-### Memory Home (single source of truth)
+This rule is the **routing contract** for memory in every Claude Code session on this machine. It tells the agent: where to read, where to write, how to classify, how to retrieve. Architecture chosen on 2026-05-25 from Anthropic's context-engineering doctrine + the 2026 OSS agent-memory convergence; date-pin lives at the bottom.
 
-All memory lives in `~/GitHub/claude-code-memory/memory/` (versioned, committed):
+### The chosen architecture (one sentence)
+
+Curated markdown files are the source of truth, frontmatter-typed and bi-temporally tagged; retrieval fuses semantic + wiki-link + entity-match signals with decay-weighted scoring; AlloyDB JIT and graphify code-topology are escape hatches called explicitly, never as the default path.
+
+Why this and not alternatives: see Anthropic's [*Effective context engineering for AI agents*](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) (Sep 29 2025) on just-in-time retrieval; the 2026 OSS retreat from LLM-on-write extraction (Letta Filesystem, Mem0 Apr 2026) validates the curated-not-auto-generated posture.
+
+### File-tier layout (source of truth)
 
 ```
 memory/
-├── MEMORY.md                    # Global index (cross-project)
-├── global/                      # Always-relevant: feedback_*, reference_*, user_*
-└── projects/{repo-slug}/        # Per-project: project_*.md + MEMORY.md index
-    └── sessions/                # Session snapshots written by session-save.sh
+├── MEMORY.md                    # Global index — block-labeled, ≤200 lines / 25 KB
+├── global/                      # Cross-project: feedback_*, reference_*, user_*
+└── projects/{repo-slug}/        # Per-project: project_*.md + MEMORY.md
+    └── sessions/                # Session snapshots (session-save.sh)
 ```
 
-**Write scope rules:**
-- `feedback_*`, `reference_*`, `user_*` (cross-project) → `memory/global/`
-- `project_*` for current repo → `memory/projects/{slug}/`
-- `feedback_*` may also live in `memory/projects/{slug}/` when the rule is **project-scoped** (only fires when working in that repo). Example: `projects/comkardia/feedback_no_overlays_on_digital_twin.md` is correct because the rule has no meaning outside ComKardia.
-- Update the nearest MEMORY.md index on every write
-- NEVER write project-scoped facts to `memory/global/` — but project-scoped `feedback_*` IS allowed in `memory/projects/{slug}/`
+**Write scope:**
+- `feedback_*`, `reference_*`, `user_*` (fires in any session) → `memory/global/`
+- `project_*` (single-repo decision / state) → `memory/projects/{slug}/`
+- `feedback_*` is also valid in `memory/projects/{slug}/` when the rule has no meaning outside that repo (example: `projects/comkardia/feedback_no_overlays_on_digital_twin.md`)
+- Update the nearest `MEMORY.md` index on every write
+- Project-scoped facts stay inside `memory/projects/{slug}/` — never in `memory/global/`
 
-### Tier Routing
+Decision rule before writing: ask "Does this rule fire when I'm working in any other repo?" Yes → global. No → project-scoped.
+
+### Frontmatter spec (required on every file)
+
+```yaml
+---
+name: Short title
+description: One-line description used to surface relevance in future sessions
+type: feedback | reference | project | user           # legacy axis (filename prefix matches)
+memory_class: factual | experiential | procedural | working    # 2026 taxonomy
+event_date: YYYY-MM-DD          # when the fact became true in the world
+ingestion_date: YYYY-MM-DD      # when we wrote it down (often same as event_date)
+decay_class: permanent | reinforced | ephemeral
+superseded_by: <relative-path>  # OPTIONAL — set when a newer file replaces this one
+---
+```
+
+**`memory_class` taxonomy** (Hu et al. 2025-12 survey arXiv:2512.13564 + LangMem):
+- `factual` — durable facts (most `reference_*` files; org charts, GCP project IDs, canonical URLs)
+- `experiential` — past events / post-mortems (most `project_*` files; incident write-ups)
+- `procedural` — behavioral rules ("always do X", "before commit verify Y") — most `feedback_*` files
+- `working` — live state for an in-flight task (`STATE.md` family; rare in `memory/`)
+
+**`decay_class`** (Ebbinghaus-curve discount on autosearch cosine score):
+- `permanent` — security invariants, org-level facts; never decay
+- `reinforced` — intended to bump on every Read; **in v1 the rate is 0, so it currently behaves identically to `permanent`** (no decay — see the score-multiplier line below). Default for active rules
+- `ephemeral` — decays after 30 days unless re-read; default for incident-specific post-mortems
+
+**`event_date` vs `ingestion_date`** — these usually match. They diverge when a fact became true earlier than its post-mortem write-up (e.g., the gateway→proxy URL flip was a 2026-05-20 event documented in a 2026-05-24 feedback file). Autosearch surfaces event_date, not write-time.
+
+**`superseded_by`** — when a newer file replaces this one (e.g., when the envision-mcp URL rule changes), set this to the relative path of the replacement. Autosearch downranks any file whose `superseded_by` resolves to a real file.
+
+### MEMORY.md index conventions
+
+- Hard cap: **200 lines or 25 KB** (matches Anthropic's Claude Code auto-memory limit; longer files lose adherence)
+- ~150 chars per entry, absolute dates only ("2026-05-25", not "yesterday")
+- One line per memory file: `- [Title](file.md) — one-line hook`
+- **Block labels** for surgical retrieval: section indexes with `## block:topic-name` so autosearch can surface specific blocks instead of the whole index (Letta pattern, May 2025)
+- Block-level HTML comments (`<!-- maintainer notes -->`) are stripped before context injection — safe place for human-only notes
+
+### Tier routing — pick the lowest tier that answers the question
 
 | Signal | Tier | Action |
-|--------|------|--------|
-| Person name | 3 | `mcp__personal-context__contact_profile(name)` |
-| "Who did I talk to about X" | 3 | `mcp__personal-context__forensic_search_v2(query)` |
-| Meeting prep | 3 | `mcp__personal-context__pre_meeting_brief(name)` |
-| Relationship/influence | 3 | `relationship_graph` or `influence_map` |
-| Communication history | 3 | `recent_activity(hours)` |
-| Behavioral rule / cross-project fact | 1 | `memory/global/feedback_*.md` or `reference_*.md` |
-| Project status, past decision (current repo) | 1 | `memory/projects/{slug}/MEMORY.md` |
-| Architecture pattern | 2 | Obsidian vault |
-| What worked/failed | 1 | `memory/projects/{slug}/FAILED_APPROACHES.md` |
+|---|---|---|
+| Behavioral rule, cross-project fact | 1 (file) | Write `memory/global/feedback_*.md` or `reference_*.md` |
+| Project status, past decision (current repo) | 1 (file) | Update `memory/projects/{slug}/MEMORY.md` + add `project_*.md` |
+| Architecture pattern | 2 (Obsidian) | Wiki-graph traverse |
+| Person, meeting, relationship | 3 (AlloyDB, JIT) | `mcp__personal-context__contact_profile|forensic_search_v2|pre_meeting_brief|recent_activity` |
+| Raw AlloyDB SQL (escape hatch) | 3 | `alloydb:alloydb-postgres-data` skill (per-cluster profile sourced; see `alloydb.md`) |
+| Code topology (any tracked repo) | 4 (graphify) | `.planning/graphs/graph.json`; portfolio at `claude-code-memory/.planning/graphs/portfolio-graph.json` |
+| What worked/failed | 1 | Append to `memory/projects/{slug}/FAILED_APPROACHES.md` |
 
-**Tier 3 (AlloyDB)**: 1.05M episodes, 8,159 contacts. Tools: `mcp__personal-context__*` — JIT only, never pre-load.
+**Tier 3 default:** curated `mcp__personal-context__*` tools (ACL-gated, audited, PII-aware). Raw SQL only when the curated surface can't express the question.
 
-### Conventions
-- 200-line / ~25KB hard limit per MEMORY.md index
-- ~150 chars per index entry, absolute dates only
-- One file per memory, frontmatter required (name, description, type)
-- Project memory is scoped: [PROJECT-MEMORY] hook injects it at session start for the current repo only
+**Tier 4 prohibition:** graphify never indexes live AlloyDB or Spanner schemas — only documentation about them. The graph holds a service's name and contract, not its schema. Non-negotiable since 2026-05-09. See `memory/global/feedback_graphify_alloydb_spanner_isolation.md`.
 
-### What NOT to store
-Code patterns, git history, debugging solutions, anything in CLAUDE.md, ephemeral task state.
+### Retrieval signals (autosearch hint emission)
 
-### Failed approaches
-Append-only, in `memory/projects/{slug}/FAILED_APPROACHES.md`.
-Format: `- [name](file.md) — what failed, why, YYYY-MM-DD`
+The `memory-autosearch.mjs` UserPromptSubmit hook fuses three signals into the `[MEMORY-AUTO]` hint:
+1. **Semantic cosine** over `memory/.embeddings.json` (gemini-embedding-001, RETRIEVAL_QUERY task type, threshold 0.45)
+2. **Wiki-link BFS** expansion 1 hop from cosine seeds (existing graph traversal)
+3. **Entity-match** boost against `memory/.entity-index.json` sidecar — files mentioning the same proper nouns as the prompt get scored higher (Mem0 April 2026 algorithm — the lever that produced their +29 pt LoCoMo gain)
+
+Score multiplier from `decay_class`: `score × exp(−age_days × rate[class])` where `rate.permanent = 0`, `rate.reinforced = 0`, `rate.ephemeral = 1/30`. `superseded_by` filter applied before scoring.
+
+### High-confidence inline pre-load
+
+When the top-1 match has **raw cosine ≥ 0.75** (Mem0's "high relevance" floor), the hook inlines that file's body (frontmatter stripped, capped at 2 KB) directly inside the `[MEMORY-AUTO]` hint. This matches Anthropic's Memory tool doctrine — *"ALWAYS VIEW YOUR MEMORY DIRECTORY BEFORE DOING ANYTHING ELSE"* — and saves the receiving agent a Read round-trip. Threshold uses raw cosine, not the entity-boosted `score`, so entity-match coincidence can't trigger spurious pre-loads. Below the threshold the hint emits paths only and the agent decides whether to Read.
+
+### Context-budget compression (headroom) — a plane, not an engine
+
+Headroom (`headroom-ai`) compresses what gets *injected* into context (large tool outputs, file dumps, search results) at the always-on proxy and via on-demand `mcp__headroom__*` tools — it is a budget optimizer, **not** a memory engine, and does **not** replace this curated-markdown layer. Hard line: **never call headroom compression inside a retrieval hook** (the 3s budget; `TIMEOUT_MS=2000` in `memory-autosearch.mjs`) — compression rides the proxy downstream of the hooks, or explicit MCP calls. Canonical `.md` files and the embedding sidecars are never compressed on disk. Full contract: `global/rules/headroom.md`; install facts: `memory/global/reference_headroom.md`.
+
+### Hooks are contractual, not informational
+
+Tags emitted by hooks are commitments the receiving agent MUST act on:
+- `[MEMORY-AUTO]` — Read the listed files before responding when they overlap the task.
+- `[MEMORY-TIER]` — Personal-context query detected (from `memory-sense.mjs`); call the suggested `mcp__personal-context__*` Tier-3 tool only when the task needs it (JIT). (The earlier keyword-scored `[MEMORY-TIER-2]` router is unwired; `[MEMORY-AUTO]` above is the live overlap-Read contract.)
+- `[TASK-CONTEXT]` (PreToolUse Task/Agent) — Subagents do NOT inherit UserPromptSubmit hooks. The parent MUST Read the listed memory files AND propagate the content into the subagent's `prompt` argument. Without propagation, the subagent flies blind. See `global/rules/agents-and-teams.md` "Context-routing hints".
+- Subagent returns: aim for 1000-2000 tokens of distilled summary (Anthropic context-engineering doctrine). `subagent-return-guard.mjs` flags any return >2K.
+
+### Anti-patterns (what doesn't belong in memory/)
+
+- Code patterns, git history, debugging traces, anything in CLAUDE.md
+- Ephemeral task state — that's STATE.md, not memory
+- Auto-generated content — every memory file is human-curated. The deliberate divergence from Claude Code auto-memory (v2.1.59+ writes to `~/.claude/projects/<repo>/memory/`) is locked via `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` in the `global/settings.json` env block. Rationale: curated tier-1 is canonical here; auto-writes fragment the tree. **Bounded exception:** `headroom learn --apply` may write a single marker-managed `## Headroom Learned Patterns` section (user 2026-06-16), gated through the `claude-md-improver` cut-first triage; see `memory/global/feedback_headroom_learn_cutfirst.md`.
+- Secrets, credentials, PII payloads (security.md governs)
+
+### Verification (the agent knows it routed correctly when)
+
+- New `feedback_*` in `memory/global/` fires in every session, not just the originating repo — verify by `grep -l "scope: global" memory/global/` after write
+- New `project_*` in `memory/projects/{slug}/` only surfaces when cwd is inside that repo — verify by switching cwd and checking the `[PROJECT-MEMORY]` hint
+- `superseded_by` chain resolves — `find memory -name "*.md" -exec grep -l "^superseded_by:" {} \;` then verify each target exists
+- Index entry exists in the nearest `MEMORY.md` (every write must touch two files: the entry and the index)
+
+### Doctrine sources (pinned 2026-05-25)
+
+- Anthropic, [*Effective context engineering for AI agents*](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) (Sep 29 2025) — just-in-time retrieval, attention budget, compaction + structured note-taking + sub-agent architectures
+- Anthropic, [Memory tool docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool) — file-based `/memories` primitive, multi-session pattern
+- Anthropic, [Claude Code memory](https://code.claude.com/docs/en/memory) — 200-line MEMORY.md cap, auto-memory v2.1.59+
+- Hu et al., [*Memory in the Age of AI Agents*](https://arxiv.org/abs/2512.13564) (2025-12) — factual/experiential/procedural/working taxonomy
+- Rasmussen et al., [Zep / Graphiti](https://arxiv.org/abs/2501.13956) (2025-01) — bi-temporal model rationale
+- Mem0, [State of AI Agent Memory 2026](https://mem0.ai/blog/state-of-ai-agent-memory-2026) (April 2026) — multi-signal retrieval (+29 pt LoCoMo from entity-match fusion)
+- Letta, [Memory Blocks](https://www.letta.com/blog/memory-blocks) (May 2025) — `## block:` labeling pattern
+
+Re-audit when any of these source pages publish material changes, or when a new model family (Opus 4.8+, Sonnet 4.7+) ships with updated agent-memory primitives.
 
 # --- security.md ---
 
@@ -663,6 +948,9 @@ globs:
 ### Secret management
 NEVER hardcode secrets — use env vars or secret manager. Rotate any exposed secrets immediately.
 
+### API key scope (Gemini cascade)
+`GOOGLE_API_KEY` and `GEMINI_API_KEY` MUST come from the same GCP project / trust class. `global/hooks/lib/memory-embed.mjs` resolves keys via a silent cascade (keychain → `GEMINI_API_KEY` → `GOOGLE_GENERATIVE_AI_API_KEY` → `GOOGLE_API_KEY`); a broader-scope `GOOGLE_API_KEY` will be used for gemini-embedding-001 traffic if the narrower key is unset. Either keep both in the same project, or unset `GOOGLE_API_KEY` from the launch env so the cascade fails closed. Full rationale: `memory/global/feedback_api_key_scope.md`.
+
 ### Sandbox
 - PreToolUse hooks block: `rm -rf`, fork bombs, `curl | sh`, `gcloud * delete`, `git push --force`, `dd if=`, `mkfs`
 - PreToolUse hooks block edits to: `.env`, credentials, `.pem`/`.key` files
@@ -670,6 +958,39 @@ NEVER hardcode secrets — use env vars or secret manager. Rotate any exposed se
 
 ### If security issue found
 STOP -> **security-reviewer** agent -> fix CRITICAL issues -> rotate exposed secrets -> review for similar issues
+
+# --- service-deployment-policy.md ---
+
+## Service Deployment Policy
+
+> **2026-06-29 — Mastra retired.** The `central-command/mastra/` subsystem was deleted (orphaned, never invoked, superseded). The old Substrate B (Hybrid) and Substrate C (Pure Mastra) are gone. Deployed backends are **Substrate A (Pure Cloud Run, Python)**; frontends are **Vercel**; cross-service/cross-repo **orchestration happens at the Claude Code layer via Dynamic Workflows** (dev-time), not as a deployed runtime service.
+
+**Default for new Envision services**: **Substrate A — Pure Cloud Run, Python** for any backend (data, platform integration, streaming, and orchestration-flavored services alike). Frontend/marketing → Vercel. There is no longer a deployable "orchestration substrate" — orchestration across services/repos is dev-time work done in Claude Code Dynamic Workflows.
+
+### The decision tree (walk top to bottom; first YES wins)
+
+1. **Frontend / marketing site?** → Vercel (Next.js). This policy doesn't apply.
+2. **Direct AlloyDB / Spanner reads or writes?** → **Substrate A: Pure Cloud Run, Python.** See `alloydb.md`.
+3. **Heavy platform integration** (Sage, Buildr, Procore, Brex, Rabbet, Gmail, Slack, Rippling)? → **Substrate A.** The `integrations/` ecosystem in Envision-MCP lives here. (Auth infrastructure — OAuth proxies, token brokers, IAP gateways — also lands on A.)
+4. **Streaming responses** (SSE / long-lived HTTP / WebSocket)? → **Substrate A.** Cloud Run + Starlette.
+5. **Orchestrates work across 2+ platforms or repos?** → If it's **dev-time coordination**, do it in **Claude Code Dynamic Workflows** (no deployed service). If it **must** be a deployed runtime service, **Substrate A** (a Python orchestrator calling other services via MCP/HTTP).
+6. Catch-all → **Substrate A.**
+
+### Where the tree lives
+
+- Canonical policy doc: `~/GitHub/central-command/docs/SERVICE-DEPLOYMENT-POLICY.md`
+- Interactive scaffold helper: `~/GitHub/central-command/scripts/new-service.sh <slug>`
+- AGENTS.md hook so every spawned agent reads it: `~/GitHub/central-command/AGENTS.md` § "Service deployment policy"
+
+### Cross-references
+
+- AlloyDB isolation rule (non-negotiable): `alloydb.md`
+- Cloud Run deploy mechanics: `envision-platform.md` § "GCP / Deploy"
+- Orchestration: Claude Code Dynamic Workflows — `context-and-internals.md` § "Dynamic Workflows", `agents-and-teams.md`
+
+### Review cadence
+
+Quarterly. Re-walk the tree against the live portfolio. Tree gaps are bugs, not service problems.
 
 # --- web-research.md ---
 
@@ -748,6 +1069,7 @@ Search first (`firecrawl_search`), scrape second (`firecrawl_scrape`). State sou
 - The Google Cloud Service Account key belongs to project claude-mcp-457317.
 - The "Envision MCP" Google Cloud Project ID is 'claude-mcp-457317'.
 - The user prefers the current model and login state to persist across all Gemini CLI sessions.
+<<<<<<< HEAD
 - The user requires all project planning, state management, and 'get-shit-done' (gsd) workflows to be executed strictly within the '~/central-command' repository. This repository acts as the master planning hub for the Envision Construction Assistant Platform. Do not use generic tools like 'npx get-shit-done-gemini' or pollute other directories with boilerplate. All sources of truth are located in '~/central-command/.planning/' (ROADMAP.md, STATE.md, PROJECT.md) and actual runtime code lives in submodules under '~/central-command/repos/'. Always follow the protocol defined in '~/central-command/AGENTS.md'.
 
 <!-- SHARED:START -->
@@ -799,3 +1121,30 @@ Full contract: `~/GitHub/central-command/.planning/determinism/knowledge-index-p
 - Current milestone/phases: `mcp__central-command__milestone_current` / `phases_list`
 - Operations: `~/GitHub/central-command/playbooks/index.md`
 <!-- SHARED:END -->
+=======
+- All project planning and GSD workflows execute within `~/central-command`. Sources of truth: `~/central-command/.planning/` (ROADMAP.md, STATE.md, PROJECT.md). Runtime code in submodules under `~/central-command/repos/`.
+
+<!-- codebase-memory-mcp:start -->
+# Codebase Knowledge Graph (codebase-memory-mcp)
+
+This project uses codebase-memory-mcp to maintain a knowledge graph of the codebase.
+ALWAYS prefer MCP graph tools over grep/glob/file-search for code discovery.
+
+## Priority Order
+1. `search_graph` — find functions, classes, routes, variables by pattern
+2. `trace_path` — trace who calls a function or what it calls
+3. `get_code_snippet` — read specific function/class source code
+4. `query_graph` — run Cypher queries for complex patterns
+5. `get_architecture` — high-level project summary
+
+## When to fall back to grep/glob
+- Searching for string literals, error messages, config values
+- Searching non-code files (Dockerfiles, shell scripts, configs)
+- When MCP tools return insufficient results
+
+## Examples
+- Find a handler: `search_graph(name_pattern=".*OrderHandler.*")`
+- Who calls it: `trace_path(function_name="OrderHandler", direction="inbound")`
+- Read source: `get_code_snippet(qualified_name="pkg/orders.OrderHandler")`
+<!-- codebase-memory-mcp:end -->
+>>>>>>> 1965fab (feat: add OKF hybrid search tools and sync GEMINI configs)

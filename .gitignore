@@ -5,3 +5,8 @@ __pycache__/
 .env
 .env.*
 node_modules/
+
+# Generator-managed Gemini extensions (written by claude-code-memory/global/scripts/mcp-sync.mjs).
+# These manifests embed local env-var values including credential file paths.
+# This repo is PUBLIC — never commit extensions/ contents.
+extensions/
