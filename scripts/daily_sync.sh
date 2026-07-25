@@ -12,9 +12,13 @@ LOG_FILE="$LOG_DIR/daily_sync.log"
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 GEMINI_EXEC="/Users/avireddy/.local/bin/gemini"
 
+# Use a project with OPEN billing
+# Verified: personal-context-2026 is active.
+export GOOGLE_CLOUD_PROJECT="personal-context-2026"
+
 mkdir -p "$LOG_DIR"
 
-echo "[$TIMESTAMP] Starting daily sync..." >> "$LOG_FILE"
+echo "[$TIMESTAMP] Starting daily sync (Project: $GOOGLE_CLOUD_PROJECT)..." >> "$LOG_FILE"
 
 # 1. Update prometheus-workspace-mcp (Reindexing)
 echo "[$TIMESTAMP] Reindexing Workspace..." >> "$LOG_FILE"
@@ -25,7 +29,7 @@ if cd "$PWM_ROOT" 2>/dev/null; then
     else
         PYTHON_EXEC="python3"
     fi
-    # Run the local reindexer script
+    # Run the local reindexer script with the open project
     if [ -f "turbovec_indexer.py" ]; then
         $PYTHON_EXEC turbovec_indexer.py >> "$LOG_FILE" 2>&1
     else
@@ -55,6 +59,7 @@ echo "[$TIMESTAMP] Dispatching high-tier analysis..." >> "$LOG_FILE"
 # Use 'gemini' CLI for orchestration.
 if [ -f "$GEMINI_EXEC" ]; then
     # Use -p/--prompt for non-interactive mode.
+    # The CLI will inherit the GOOGLE_CLOUD_PROJECT from the export above.
     $GEMINI_EXEC --prompt "
     Analyze the last 24h of activity across the Envision platform repositories.
     Generate a concise summary of work completed and identify the top priority for today.
