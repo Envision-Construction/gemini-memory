@@ -10,6 +10,7 @@ GEMINI_MEMORY_ROOT="$PROJECT_ROOT/gemini-memory"
 LOG_DIR="$HOME/.gemini/logs"
 LOG_FILE="$LOG_DIR/daily_sync.log"
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+GEMINI_EXEC="/Users/avireddy/.local/bin/gemini"
 
 mkdir -p "$LOG_DIR"
 
@@ -18,9 +19,15 @@ echo "[$TIMESTAMP] Starting daily sync..." >> "$LOG_FILE"
 # 1. Update prometheus-workspace-mcp (Reindexing)
 echo "[$TIMESTAMP] Reindexing Workspace..." >> "$LOG_FILE"
 if cd "$PWM_ROOT" 2>/dev/null; then
+    # Use the local virtual environment if it exists
+    if [ -f ".venv/bin/python3" ]; then
+        PYTHON_EXEC="./.venv/bin/python3"
+    else
+        PYTHON_EXEC="python3"
+    fi
     # Run the local reindexer script
     if [ -f "turbovec_indexer.py" ]; then
-        python3 turbovec_indexer.py >> "$LOG_FILE" 2>&1
+        $PYTHON_EXEC turbovec_indexer.py >> "$LOG_FILE" 2>&1
     else
         echo "Warning: turbovec_indexer.py not found in $PWM_ROOT" >> "$LOG_FILE"
     fi
@@ -46,8 +53,9 @@ fi
 # 3. Intelligent Analysis Dispatch (Baton-Passing)
 echo "[$TIMESTAMP] Dispatching high-tier analysis..." >> "$LOG_FILE"
 # Use 'gemini' CLI for orchestration.
-if command -v gemini &> /dev/null; then
-    gemini --model sonnet --command "
+if [ -f "$GEMINI_EXEC" ]; then
+    # Use -p/--prompt for non-interactive mode.
+    $GEMINI_EXEC --prompt "
     Analyze the last 24h of activity across the Envision platform repositories.
     Generate a concise summary of work completed and identify the top priority for today.
     If you detect significant blockers or architectural deviations, invoke the 'generalist' 
@@ -55,7 +63,7 @@ if command -v gemini &> /dev/null; then
     Append the result to your project's MEMORY.md.
     " >> "$LOG_FILE" 2>&1
 else
-    echo "Warning: 'gemini' command not found. Skipping analysis dispatch." >> "$LOG_FILE"
+    echo "Warning: '$GEMINI_EXEC' not found. Skipping analysis dispatch." >> "$LOG_FILE"
 fi
 
 echo "[$TIMESTAMP] Daily sync complete." >> "$LOG_FILE"
